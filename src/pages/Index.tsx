@@ -1,5 +1,7 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import Icon from "@/components/ui/icon";
+
+const API_URL = "https://functions.poehali.dev/3181eacc-97fb-4c58-8351-ee3586ad5028";
 
 type Tab = "home" | "create" | "gallery" | "profile" | "faq";
 
@@ -30,7 +32,11 @@ export default function Index() {
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generateProgress, setGenerateProgress] = useState(0);
+  const [generateStatus, setGenerateStatus] = useState("");
   const [generatedDone, setGeneratedDone] = useState(false);
+  const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [videos, setVideos] = useState(mockVideos);
   const [openFaq, setOpenFaq] = useState<number | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -50,24 +56,65 @@ export default function Index() {
     if (file && file.type.startsWith("image/")) handleFileUpload(file);
   }, []);
 
-  const handleGenerate = () => {
+  useEffect(() => {
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, []);
+
+  const handleGenerate = async () => {
     if (!uploadedImage || !prompt) return;
     setIsGenerating(true);
-    setGenerateProgress(0);
+    setGenerateProgress(5);
+    setGenerateStatus("Загружаем фотографию...");
     setGeneratedDone(false);
-    let p = 0;
-    const interval = setInterval(() => {
-      p += Math.random() * 8 + 2;
-      if (p >= 100) {
-        p = 100;
-        clearInterval(interval);
-        setTimeout(() => {
-          setIsGenerating(false);
-          setGeneratedDone(true);
-        }, 400);
-      }
-      setGenerateProgress(Math.min(p, 100));
-    }, 200);
+    setGeneratedVideoUrl(null);
+    setGenerateError(null);
+
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: uploadedImage, prompt, duration: selectedDuration }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.job_id) throw new Error(data.error || "Ошибка запуска");
+
+      const jobId = data.job_id;
+      setGenerateProgress(15);
+      setGenerateStatus("ИИ анализирует фотографию...");
+
+      let elapsed = 0;
+      pollRef.current = setInterval(async () => {
+        elapsed += 3;
+        const maxSecs = selectedDuration * 12 + 60;
+        const fakeProgress = Math.min(15 + (elapsed / maxSecs) * 80, 92);
+        setGenerateProgress(fakeProgress);
+        if (elapsed < 20) setGenerateStatus("Генерируем движение...");
+        else if (elapsed < 50) setGenerateStatus("Рендерим кадры...");
+        else setGenerateStatus("Финальная обработка...");
+
+        try {
+          const sr = await fetch(`${API_URL}?id=${jobId}`);
+          const sd = await sr.json();
+          if (sd.status === "succeeded" && sd.video_url) {
+            clearInterval(pollRef.current!);
+            setGenerateProgress(100);
+            setGenerateStatus("Готово!");
+            setTimeout(() => {
+              setIsGenerating(false);
+              setGeneratedDone(true);
+              setGeneratedVideoUrl(sd.video_url);
+            }, 500);
+          } else if (sd.status === "failed") {
+            clearInterval(pollRef.current!);
+            setIsGenerating(false);
+            setGenerateError("Не удалось создать видео. Попробуй другое фото или промт.");
+          }
+        } catch (pollErr) { console.warn("poll error", pollErr); }
+      }, 3000);
+    } catch (e: unknown) {
+      setIsGenerating(false);
+      setGenerateError(e instanceof Error ? e.message : "Произошла ошибка");
+    }
   };
 
   const toggleLike = (id: number) => {
@@ -251,7 +298,7 @@ export default function Index() {
                     <img src={uploadedImage} alt="uploaded" className="w-full h-full object-cover" />
                     <div className="absolute inset-0 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity"
                       style={{ background: "rgba(0,0,0,0.5)" }}>
-                      <button onClick={() => { setUploadedImage(null); setGeneratedDone(false); }}
+                      <button onClick={() => { setUploadedImage(null); setGeneratedDone(false); setGeneratedVideoUrl(null); setGenerateError(null); }}
                         className="btn-ghost rounded-full px-4 py-2 text-white text-sm flex items-center gap-2">
                         <Icon name="Trash2" size={14} /> Удалить
                       </button>
@@ -328,6 +375,21 @@ export default function Index() {
                 </button>
               )}
 
+              {/* Error */}
+              {generateError && (
+                <div className="glass rounded-2xl p-4 animate-scale-in flex items-start gap-3"
+                  style={{ border: "1px solid rgba(239,68,68,0.3)" }}>
+                  <Icon name="AlertCircle" size={18} style={{ color: "#ef4444", flexShrink: 0, marginTop: 2 }} />
+                  <div>
+                    <div className="text-white text-sm font-semibold mb-1">Не удалось создать видео</div>
+                    <div className="text-xs text-muted-foreground">{generateError}</div>
+                    <button onClick={() => setGenerateError(null)} className="text-xs text-purple-400 mt-2 underline">
+                      Попробовать снова
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Progress */}
               {isGenerating && (
                 <div className="glass rounded-2xl p-6 animate-scale-in">
@@ -341,40 +403,38 @@ export default function Index() {
                     </div>
                   </div>
                   <div className="w-full h-2 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.08)" }}>
-                    <div className="h-full progress-bar rounded-full transition-all duration-300"
+                    <div className="h-full progress-bar rounded-full transition-all duration-1000"
                       style={{ width: `${generateProgress}%` }} />
                   </div>
-                  <div className="mt-3 text-xs text-muted-foreground text-center">
-                    {generateProgress < 30 ? "Анализируем фотографию..." :
-                     generateProgress < 60 ? "Генерируем движение..." :
-                     generateProgress < 85 ? "Рендерим кадры..." : "Финальная обработка..."}
-                  </div>
+                  <div className="mt-3 text-xs text-muted-foreground text-center">{generateStatus}</div>
                 </div>
               )}
 
               {/* Result */}
-              {generatedDone && (
+              {generatedDone && generatedVideoUrl && (
                 <div className="glass rounded-2xl overflow-hidden animate-scale-in" style={{ border: "1px solid rgba(168,85,247,0.3)" }}>
-                  <div className="relative" style={{ height: 220 }}>
-                    <img src={uploadedImage!} alt="result" className="w-full h-full object-cover" />
-                    <div className="absolute inset-0 flex items-center justify-center"
-                      style={{ background: "rgba(0,0,0,0.4)" }}>
-                      <div className="w-16 h-16 rounded-full btn-primary neon-glow flex items-center justify-center">
-                        <Icon name="Play" size={24} className="text-white ml-1" />
-                      </div>
-                    </div>
+                  <div className="relative bg-black">
+                    <video
+                      src={generatedVideoUrl}
+                      controls
+                      autoPlay
+                      loop
+                      playsInline
+                      className="w-full"
+                      style={{ maxHeight: 320, display: "block" }}
+                    />
                     <div className="absolute top-3 left-3 rounded-full px-3 py-1 text-xs text-white flex items-center gap-1"
                       style={{ background: "rgba(168,85,247,0.8)" }}>
                       ✨ Готово!
                     </div>
-                    <div className="absolute top-3 right-3 rounded-full px-2 py-1 text-xs text-white"
-                      style={{ background: "rgba(0,0,0,0.7)" }}>{selectedDuration}с</div>
                   </div>
                   <div className="p-4 flex gap-2">
-                    <button className="flex-1 btn-primary rounded-xl py-3 flex items-center justify-center gap-2 text-white font-semibold text-sm">
+                    <a href={generatedVideoUrl} download={`kekai-video.mp4`} target="_blank" rel="noreferrer"
+                      className="flex-1 btn-primary rounded-xl py-3 flex items-center justify-center gap-2 text-white font-semibold text-sm">
                       <Icon name="Download" size={16} /> Скачать
-                    </button>
-                    <button className="flex-1 btn-ghost rounded-xl py-3 flex items-center justify-center gap-2 text-white text-sm">
+                    </a>
+                    <button onClick={() => navigator.share?.({ url: generatedVideoUrl }).catch(() => navigator.clipboard.writeText(generatedVideoUrl))}
+                      className="flex-1 btn-ghost rounded-xl py-3 flex items-center justify-center gap-2 text-white text-sm">
                       <Icon name="Share2" size={16} /> Поделиться
                     </button>
                   </div>
